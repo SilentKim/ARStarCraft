@@ -48,6 +48,7 @@ private:
 	LPD3DXSPRITE m_sprite;
 	graphic::cSprite *m_videoSprite;
 	graphic::cCharacter m_character;
+	graphic::cLine m_line[3];
 
 	VideoCapture m_inputVideo;
 	Mat m_camImage;
@@ -166,9 +167,17 @@ bool cViewer::OnInit()
 	GetMainLight().Init(cLight::LIGHT_DIRECTIONAL);
 	GetMainLight().SetPosition(Vector3(5, 5, 5));
 	GetMainLight().SetDirection(Vector3(1, -1, 1).Normal());
+	GetMainLight().Bind(m_renderer, 0);
 
 	m_renderer.GetDevice()->SetRenderState(D3DRS_NORMALIZENORMALS, TRUE);
 	m_renderer.GetDevice()->LightEnable(0, true);
+
+	m_line[0].SetLine(m_renderer, Vector3(0, 0, 0), Vector3(1, 0, 0), 0.1f);
+	m_line[0].GetMaterial().InitRed();
+	m_line[1].SetLine(m_renderer, Vector3(0, 0, 0), Vector3(0, 1, 0), 0.1f);
+	m_line[1].GetMaterial().InitGreen();
+	m_line[2].SetLine(m_renderer, Vector3(0, 0, 0), Vector3(0, 0, 1), 0.1f);
+	m_line[2].GetMaterial().InitBlue();
 
 
 	m_detectorParams = aruco::DetectorParameters::create();
@@ -184,77 +193,209 @@ bool cViewer::OnInit()
 }
 
 
+// 모델뷰 행렬(OpenGL) -> 뷰 행렬(Direct3D)
+// http://www.cg-ya.net/imedia/ar/artoolkit_directx/
+void D3DConvMatrixView(float* src, D3DXMATRIXA16* dest)
+{
+	// src의 값을 dest로 1:1 복사를 수행한다.
+	dest->_11 = src[0];
+	dest->_12 = -src[1];
+	dest->_13 = src[2];
+	dest->_14 = src[3];
+
+	dest->_21 = src[8];
+	dest->_22 = -src[9];
+	dest->_23 = src[10];
+	dest->_24 = src[7];
+
+	dest->_31 = src[4];
+	dest->_32 = -src[5];
+	dest->_33 = src[6];
+	dest->_34 = src[11];
+
+	dest->_41 = src[12];
+	dest->_42 = -src[13];
+	dest->_43 = src[14];
+	dest->_44 = src[15];
+}
+
+
+// 투영 행렬(OpenGL) -> 투영 행렬(Direct3D)
+// http://www.cg-ya.net/imedia/ar/artoolkit_directx/
+void D3DConvMatrixProjection(float* src, D3DXMATRIXA16* dest)
+{
+	dest->_11 = src[0];
+	dest->_12 = src[1];
+	dest->_13 = src[2];
+	dest->_14 = src[3];
+	dest->_21 = src[4];
+	dest->_22 = src[5];
+	dest->_23 = src[6];
+	dest->_24 = src[7];
+	dest->_31 = -src[8];
+	dest->_32 = -src[9];
+	dest->_33 = -src[10];
+	dest->_34 = -src[11];
+	dest->_41 = src[12];
+	dest->_42 = src[13];
+	dest->_43 = src[14];
+	dest->_44 = src[15];
+}
+
+
+
 void cViewer::OnUpdate(const float elapseT)
 {
-	if (!m_inputVideo.grab())
+	static float incT = 0;
+	incT += elapseT;
+	if (incT < 0.033f)
 		return;
 
+	GetMainCamera()->Update();
+	m_character.Update(incT);
+
+	incT = 0;
+
 	Mat image;
-	m_inputVideo.retrieve(image);
+	m_inputVideo >> image;
 	if (!image.data)
 		return;
 
-	vector< int > ids;
-	vector< vector< Point2f > > corners, rejected;
-	vector< Vec3d > rvecs, tvecs;
-
-	// detect markers and estimate pose
-	aruco::detectMarkers(image, m_dictionary, corners, ids, m_detectorParams, rejected);
-
-	if (ids.size() > 0) 
+	if (1)
 	{
-		aruco::estimatePoseSingleMarkers(corners, m_markerLength, m_camMatrix, m_distCoeffs, rvecs, tvecs);
-		aruco::drawDetectedMarkers(image, corners, ids);
+		vector< int > ids;
+		vector< vector< Point2f > > corners, rejected;
+		vector< Vec3d > rvecs, tvecs;
 
-		for (unsigned int i = 0; i < ids.size(); i++)
+		// detect markers and estimate pose
+		aruco::detectMarkers(image, m_dictionary, corners, ids, m_detectorParams, rejected);
+
+		if (1 && ids.size() > 0)
 		{
-			aruco::drawAxis(image, m_camMatrix, m_distCoeffs, rvecs[i], tvecs[i], m_markerLength * 0.5f);
+			aruco::estimatePoseSingleMarkers(corners, m_markerLength, m_camMatrix, m_distCoeffs, rvecs, tvecs);
+			aruco::drawDetectedMarkers(image, corners, ids);
 
-			// change aruco space to direct x space
-			Mat rot;
-			Rodrigues(rvecs[i], rot);
-			Mat invRot;
-			transpose(rot, invRot); // inverse matrix
-			double *pinvR = invRot.ptr<double>();
+			for (unsigned int i = 0; i < ids.size(); i++)
+			{
+				aruco::drawAxis(image, m_camMatrix, m_distCoeffs, rvecs[i], tvecs[i], m_markerLength * 0.5f);
 
-			Matrix44 tm;
-			tm.m[0][0] = -(float)pinvR[0];
-			tm.m[0][1] = (float)pinvR[1];
-			tm.m[0][2] = -(float)pinvR[2];
-			
-			tm.m[1][0] = -(float)pinvR[3];
-			tm.m[1][1] = (float)pinvR[4];
-			tm.m[1][2] = -(float)pinvR[5];
+				// change aruco space to direct x space
+				Mat rot;
+				Rodrigues(rvecs[i], rot);
 
-			tm.m[2][0] = -(float)pinvR[6];
-			tm.m[2][1] = (float)pinvR[7];
-			tm.m[2][2] = -(float)pinvR[8];
+				Mat viewMatrix = cv::Mat::zeros(4, 4, CV_32F);
+				for (unsigned int row = 0; row < 3; ++row)
+				{
+					for (unsigned int col = 0; col < 3; ++col)
+					{
+						viewMatrix.at<float>(row, col) = (float)rot.at<double>(row, col);
+					}
+					viewMatrix.at<float>(row, 3) = 0;// (float)tvecs[i][row] * 0.01f;
+					//viewMatrix.at<float>(row, 3) = (float)tvecs[i][row] * 0.1f;
+				}
+				viewMatrix.at<float>(3, 3) = 1.0f;
 
-			Matrix44 rot2;
-			rot2.SetRotationX(ANGLE2RAD(-90)); // y-z axis change
+				cv::Mat cvToGl = cv::Mat::zeros(4, 4, CV_32F);
+				cvToGl.at<float>(0, 0) = 1.0f;
+				cvToGl.at<float>(1, 1) = -1.0f; // Invert the y axis 
+				cvToGl.at<float>(2, 2) = -1.0f; // invert the z axis 
+				cvToGl.at<float>(3, 3) = 1.0f;
+				viewMatrix = cvToGl * viewMatrix;
+				
+				Matrix44 m(viewMatrix.ptr<float>());
+				Matrix44 rm;
+				rm.SetRotationX(ANGLE2RAD(180));
+				m_zealotCameraView = m;
 
-			Matrix44 trans;
-			trans.SetPosition( Vector3((float)tvecs[i][0], -(float)tvecs[i][1], (float)tvecs[i][2]) * 0.01f );
+				
 
-			m_zealotCameraView = rot2 * tm * trans;
+// 				m_zealotCameraView._41 = -.2f;
+// 				m_zealotCameraView._42 = .2f;
+// 				m_zealotCameraView._43 = .8f;
+
+				// 			cv::Mat cvToGl = cv::Mat::zeros(4, 4, CV_32F);
+				// 			cvToGl.at<float>(0, 0) = 1.0f;
+				// 			cvToGl.at<float>(1, 1) = 1.0f; // Invert the y axis 
+				// 			cvToGl.at<float>(2, 2) = 1.0f; // invert the z axis 
+				// 			cvToGl.at<float>(3, 3) = 1.0f;
+				// 			viewMatrix = cvToGl * viewMatrix;
+				// 			//viewMatrix = viewMatrix * cvToGl;
+				// 
+				//  			m_zealotCameraView.SetIdentity();
+				// 			float *vm = viewMatrix.ptr<float>();
+				// 			m_zealotCameraView.m[0][0] = vm[0];
+				// 			m_zealotCameraView.m[0][1] = vm[1];
+				// 			m_zealotCameraView.m[0][2] = vm[2];
+				// 			m_zealotCameraView.m[0][3] = vm[3];
+				// 
+				// 			m_zealotCameraView.m[1][0] = vm[4];
+				// 			m_zealotCameraView.m[1][1] = vm[5];
+				// 			m_zealotCameraView.m[1][2] = vm[6];
+				// 			m_zealotCameraView.m[1][3] = vm[7];
+				// 
+				// 			m_zealotCameraView.m[2][0] = vm[8];
+				// 			m_zealotCameraView.m[2][1] = vm[9];
+				// 			m_zealotCameraView.m[2][2] = vm[10];
+				// 			m_zealotCameraView.m[2][3] = vm[11];
+
+				// 			m_zealotCameraView.m[3][0] = (float)tvecs[i][0] * 0.01f;
+				// 			m_zealotCameraView.m[3][1] = (float)tvecs[i][1] * 0.01f;
+				// 			m_zealotCameraView.m[3][2] = (float)tvecs[i][2] * 0.01f;
+				// 			m_zealotCameraView.m[3][3] = vm[15];
+
+				// 			m_zealotCameraView.m[3][0] = 500;// vm[12];
+				// 			m_zealotCameraView.m[3][1] = 500;// vm[13];
+				// 			m_zealotCameraView.m[3][2] = 500;// vm[14];
+				// 			m_zealotCameraView.m[3][3] = vm[15];
+
+				//m_zealotCameraView  = m_zealotCameraView.Inverse();
+
+				//cv::transpose(viewMatrix, viewMatrix);
+
+				// 			D3DConvMatrixView((float*)viewMatrix.data, (D3DXMATRIXA16*)&m_zealotCameraView);
+
+
+				// 			Mat invRot;
+				// 			transpose(rot, invRot); // inverse matrix
+				// 			double *pinvR = invRot.ptr<double>();
+				// 
+				// 			Matrix44 tm;
+				// 			tm.m[0][0] = -(float)pinvR[0];
+				// 			tm.m[0][1] = (float)pinvR[1];
+				// 			tm.m[0][2] = -(float)pinvR[2];
+				// 			
+				// 			tm.m[1][0] = -(float)pinvR[3];
+				// 			tm.m[1][1] = (float)pinvR[4];
+				// 			tm.m[1][2] = -(float)pinvR[5];
+				// 
+				// 			tm.m[2][0] = -(float)pinvR[6];
+				// 			tm.m[2][1] = (float)pinvR[7];
+				// 			tm.m[2][2] = -(float)pinvR[8];
+				// 
+				// 			Matrix44 rot2;
+				// 			rot2.SetRotationX(ANGLE2RAD(-90)); // y-z axis change
+				// 
+				// 			Matrix44 trans;
+				// 			trans.SetPosition( Vector3((float)tvecs[i][0], -(float)tvecs[i][1], (float)tvecs[i][2]) * 0.01f );
+				// 
+				// 			m_zealotCameraView = rot2 * tm * trans;
+			}
 		}
+
+		// display camera image to DirectX Texture
+		D3DLOCKED_RECT lockRect;
+		m_videoSprite->GetTexture()->Lock(lockRect);
+		if (lockRect.pBits)
+		{
+			Mat BGRA = image.clone();
+			cvtColor(image, BGRA, CV_BGR2BGRA, 4);
+			const size_t sizeInBytes2 = BGRA.step[0] * BGRA.rows;
+			memcpy(lockRect.pBits, BGRA.data, sizeInBytes2);
+			m_videoSprite->GetTexture()->Unlock();
+		}
+
 	}
 
-	// display camera image to DirectX Texture
-	D3DLOCKED_RECT lockRect;
-	m_videoSprite->GetTexture()->Lock(lockRect);
-	if (lockRect.pBits)
-	{
-		Mat BGRA = image.clone();
-		cvtColor(image, BGRA, CV_BGR2BGRA, 4);
-		const size_t sizeInBytes2 = BGRA.step[0] * BGRA.rows;
-		memcpy(lockRect.pBits, BGRA.data, sizeInBytes2);
-		m_videoSprite->GetTexture()->Unlock();
-	}
-
-	GetMainCamera()->Update();
-
-	m_character.Update(elapseT);
 }
 
 
@@ -265,16 +406,24 @@ void cViewer::OnRender(const float elapseT)
 	{
 		m_renderer.GetDevice()->BeginScene();
 
-		m_renderer.RenderGrid();
-		m_renderer.RenderAxis();
-
 		m_renderer.GetDevice()->SetRenderState(D3DRS_ZENABLE, 0);
 		m_videoSprite->Render(m_renderer, Matrix44::Identity);
 		m_renderer.GetDevice()->SetRenderState(D3DRS_ZENABLE, 1);
 
- 		GetMainCamera()->SetViewMatrix(m_zealotCameraView);
- 		m_renderer.GetDevice()->SetTransform(D3DTS_VIEW, (D3DMATRIX*)&m_zealotCameraView);
-		m_character.Render(m_renderer, Matrix44::Identity);
+		m_renderer.RenderGrid();
+		m_renderer.RenderAxis();
+
+		m_renderer.GetDevice()->LightEnable(0, true);
+		m_line[0].Render(m_renderer, m_zealotCameraView);
+		m_line[1].Render(m_renderer, m_zealotCameraView);
+		m_line[2].Render(m_renderer, m_zealotCameraView);
+		m_renderer.GetDevice()->LightEnable(0, true);
+
+
+
+//  		GetMainCamera()->SetViewMatrix(m_zealotCameraView);
+//  		m_renderer.GetDevice()->SetTransform(D3DTS_VIEW, (D3DMATRIX*)&m_zealotCameraView);
+		//m_character.Render(m_renderer, Matrix44::Identity);
 
 		m_renderer.RenderFPS();
 
